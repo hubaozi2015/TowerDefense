@@ -1,5 +1,9 @@
+# Tower Defense V 1.3 
+Made getting coins 50% harder and added circles to the radius to show area. Added rainbow balloons. 
+
 # Tower Defense V 1.2 
 Added 2 new tanks, Sniper(100$) and Cannon(120$).
+
 # Tower Defense V 1.1
 Bug Changes: Start wave button spamming fixed. 
 
