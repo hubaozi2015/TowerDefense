@@ -1,5 +1,7 @@
+# Tower Defense V 1.2 
+Added 2 new tanks, Sniper(100$) and Cannon(120$).
 # Tower Defense V 1.1
-put the changes here andy 
+Bug Changes: Start wave button spamming fixed. 
 
 # Tower Defense V 1.0
 
