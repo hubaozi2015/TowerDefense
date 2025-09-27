@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Bloons-Lite with Upgrades</title>
+<style>
+  html,body{margin:0;height:100%;background:#0e0f14;color:#eaeaea;font-family:system-ui,Arial,sans-serif}
+  #wrap{display:grid;place-items:center;height:100%;gap:12px}
+  #hud{display:flex;gap:14px;align-items:center;user-select:none;flex-wrap:wrap;justify-content:center}
+  .pill{background:#1a1d27;padding:8px 12px;border-radius:999px;border:1px solid #2a2f3f}
+  button{padding:8px 12px;border-radius:10px;border:1px solid #3a4257;background:#1e2433;color:#eaeaea;cursor:pointer}
+  button:active{transform:translateY(1px)}
+  canvas{background:#0b0d12;border:1px solid #2a2f3f;border-radius:12px;box-shadow:0 12px 30px rgba(0,0,0,.35)}
+  #tip{font-size:13px;opacity:.9}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="hud">
+    <div class="pill">💰 Money: <span id="money">200</span></div>
+    <div class="pill">❤️ Lives: <span id="lives">20</span></div>
+    <div class="pill">🌊 Wave: <span id="wave">0</span></div>
+    <button id="startWave">Start Wave (Space)</button>
+    <div id="tip">Click empty map: place <b>Dart Tower</b> ($50). Click a tower: <b>Upgrade</b> ($50). Purple bloons take <b>6 hits</b>.</div>
+  </div>
+  <canvas id="game" width="960" height="540"></canvas>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const ui = {
+    moneyEl: document.getElementById('money'),
+    livesEl: document.getElementById('lives'),
+    waveEl: document.getElementById('wave'),
+    startBtn: document.getElementById('startWave'),
+    tipEl: document.getElementById('tip'),
+  };
+
+  // ------- GAME STATE -------
+  const state = {
+    money: 200,
+    lives: 20,
+    wave: 0,
+    towerCost: 50,
+    upgradeCost: 50,
+    towers: [],
+    darts: [],
+    bloons: [],
+    spawnQueue: [],
+    spawnTimer: 0,
+    running: true,
+  };
+
+  let tipTimer = 0; // seconds remaining to show a temporary message
+
+  // ------- PATH (waypoints) -------
+  const path = [
+    {x:-40,y:270}, {x:120,y:270}, {x:240,y:180}, {x:360,y:360},
+    {x:480,y:180}, {x:600,y:360}, {x:760,y:270}, {x:1000,y:270}
+  ];
+
+  // ------- HELPERS -------
+  const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+  const dist  = (a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+  const lerp  = (a,b,t)=>a+(b-a)*t;
+
+  function setTip(msg, seconds=1.2){
+    ui.tipEl.textContent = msg;
+    tipTimer = seconds;
+  }
+
+  // ------- BLOONS -------
+  // Normal layered bloons (downgrade on hit), plus Purple has 6 HP (no downgrade).
+  const BloonInfo = {
+    red  : {color:'#ff4d5a', speed:70,  cash:1,  next:'none', radius:10},
+    blue : {color:'#5bb8ff', speed:85,  cash:1,  next:'red',  radius:11},
+    green: {color:'#73ff7b', speed:100, cash:1,  next:'blue', radius:12},
+
+    // New: Purple needs 6 hits regardless of tower (regular tower pops 1 layer per hit).
+    purple: {color:'#b06cff', speed:110, cash:1, hits:6, next:'none', radius:13},
+  };
+
+  class Bloon {
+    constructor(type='red'){
+      this.type = type;
+      this.info = BloonInfo[type];
+      this.seg = 0;
+      this.t = 0;
+      this.alive = true;
+      this.yJitter = (Math.random()*10-5);
+
+      // If this bloon uses "hits", set per-instance counter.
+      this.hits = this.info.hits ? this.info.hits : 1;
+    }
+    get pos(){
+      const a = path[this.seg], b = path[this.seg+1] || a;
+      return { x: lerp(a.x,b.x,this.t), y: lerp(a.y,b.y,this.t)+this.yJitter };
+    }
+    update(dt){
+      if (!this.alive) return;
+      let remaining = this.info.speed*dt;
+      while (remaining > 0 && this.alive){
+        const a = path[this.seg], b = path[this.seg+1];
+        if (!b){ // hit end
+          this.alive=false; state.lives = Math.max(0, state.lives-1); break;
+        }
+        const segLen = Math.hypot(b.x-a.x, b.y-a.y);
+        const segLeft = (1-this.t)*segLen;
+        if (remaining < segLeft){ this.t += remaining/segLen; remaining=0; }
+        else { remaining -= segLeft; this.seg++; this.t=0; }
+      }
+    }
+    // Tower “damage” always counts as 1 hit (regular dart), pierce handled on the dart.
+    hit(){
+      if (!this.alive) return;
+      state.money += this.info.cash; // small reward per layer/hit
+      if (this.info.hits){ // Purple-like HP bloon
+        this.hits -= 1;
+        if (this.hits <= 0){
+          this.alive = false;
+        }
+      } else {
+        // Layered downgrade chain (green->blue->red->pop)
+        if (this.info.next && this.info.next !== 'none'){
+          this.type = this.info.next;
+          this.info = BloonInfo[this.type];
+          // reset size/speed; hits stays 1
+        } else {
+          this.alive = false;
+        }
+      }
+    }
+    draw(){
+      const p = this.pos;
+      ctx.fillStyle = this.info.color;
+      ctx.beginPath();
+      ctx.ellipse(p.x, p.y, this.info.radius, this.info.radius*0.85, 0, 0, Math.PI*2);
+      ctx.fill();
+
+      // highlight
+      ctx.fillStyle = 'rgba(255,255,255,.12)';
+      ctx.beginPath(); ctx.arc(p.x-4, p.y-4, 4, 0, Math.PI*2); ctx.fill();
+
+      // optional HP pips for purple
+      if (this.info.hits){
+        ctx.fillStyle = 'rgba(255,255,255,.35)';
+        ctx.font = 'bold 11px system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText(String(this.hits), p.x, p.y+4);
+      }
+    }
+  }
+
+  // ------- DART TOWER with Upgrade -------
+  class Tower {
+    constructor(x,y){
+      this.x=x; this.y=y;
+      this.range = 150;
+      this.fireRate = 3.2; // shots per second
+      this.cooldown = 0;
+      this.dartSpeed = 420;
+      this.pierce = 1;     // hits multiple bloons/layers in sequence (per dart)
+      this.upgraded = false;
+    }
+    tryUpgrade(){
+      if (this.upgraded) { setTip('Already upgraded'); return; }
+      if (state.money < state.upgradeCost){
+        setTip('Not enough money');
+        return;
+      }
+      state.money -= state.upgradeCost;
+      // Upgrade stats
+      this.upgraded = true;
+      this.range += 35;
+      this.fireRate = 4.8;
+      this.pierce = 2;           // pierce more layers/bloons
+      this.dartSpeed = 500;
+      updateHUD();
+      setTip('Tower upgraded!');
+    }
+    update(dt){
+      this.cooldown = Math.max(0, this.cooldown - dt);
+      if (this.cooldown>0) return;
+
+      // target: furthest-in-range
+      let best=null; let bestProgress=-1;
+      for (const b of state.bloons){
+        if (!b.alive) continue;
+        const p = b.pos;
+        if (dist({x:this.x,y:this.y}, p) <= this.range){
+          const progress = b.seg + b.t;
+          if (progress > bestProgress){ best=b; bestProgress=progress; }
+        }
+      }
+      if (best){
+        state.darts.push(new Dart(this.x, this.y, best, this.dartSpeed, this.pierce));
+        this.cooldown = 1/this.fireRate;
+      }
+    }
+    draw(){
+      // base (color depends on upgrade)
+      ctx.fillStyle = this.upgraded ? '#ff9f5a' : '#6aa8ff';
+      ctx.beginPath(); ctx.arc(this.x,this.y,14,0,Math.PI*2); ctx.fill();
+
+      // barrel aim
+      let tx=this.x+18, ty=this.y;
+      let nearest=null, nd=Infinity;
+      for (const b of state.bloons){
+        if (!b.alive) continue;
+        const d=dist({x:this.x,y:this.y}, b.pos);
+        if (d<nd){nd=d; nearest=b;}
+      }
+      if (nearest){
+        const p=nearest.pos, ang=Math.atan2(p.y-this.y,p.x-this.x);
+        tx=this.x+Math.cos(ang)*22; ty=this.y+Math.sin(ang)*22;
+      }
+      ctx.strokeStyle='#cfe1ff'; ctx.lineWidth=3;
+      ctx.beginPath(); ctx.moveTo(this.x,this.y); ctx.lineTo(tx,ty); ctx.stroke();
+
+      // range ring
+      ctx.strokeStyle='rgba(200,220,255,0.08)'; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.arc(this.x,this.y,this.range,0,Math.PI*2); ctx.stroke();
+    }
+    containsPoint(px,py){
+      return Math.hypot(px-this.x, py-this.y) <= 16;
+    }
+  }
+
+  class Dart {
+    constructor(x,y,target,speed,pierce){
+      this.x=x; this.y=y; this.target=target; this.speed=speed; this.pierce=pierce;
+      this.alive=true;
+    }
+    update(dt){
+      if (!this.alive) return;
+      if (!this.target || !this.target.alive){ this.alive=false; return; }
+      const p=this.target.pos, dx=p.x-this.x, dy=p.y-this.y, d=Math.hypot(dx,dy);
+      if (d<10){
+        // On hit, pop one "layer" / decrement HP; then continue if pierce remains
+        this.target.hit();
+        this.pierce--;
+        if (this.pierce<=0) { this.alive=false; }
+        return;
+      }
+      const vx=(dx/d)*this.speed, vy=(dy/d)*this.speed;
+      this.x+=vx*dt; this.y+=vy*dt;
+    }
+    draw(){
+      ctx.fillStyle='#ffd86a';
+      ctx.beginPath(); ctx.arc(this.x,this.y,3.5,0,Math.PI*2); ctx.fill();
+    }
+  }
+
+  // ------- WAVES (now include purple) -------
+  // {type, delay}
+  function waveDef(counts, gap=0.5){
+    const order = ['green','blue','red','purple'];
+    const q=[];
+    let i=0;
+    for (const type of order){
+      const n = counts[type] || 0;
+      for (let k=0;k<n;k++){
+        q.push({type, delay: i*gap}); i++;
+      }
+    }
+    return q;
+  }
+
+  const waves = [
+    ()=>waveDef({red:12}, 0.55),
+    ()=>waveDef({blue:10, red:6}, 0.50),
+    ()=>waveDef({green:8, blue:10}, 0.48),
+    ()=>waveDef({green:12, blue:12, red:4}, 0.45),
+    ()=>waveDef({green:14, blue:10, purple:4}, 0.44), // introduce purple
+    ()=>waveDef({green:16, blue:12, purple:8}, 0.42),
+    ()=>waveDef({green:18, blue:12, red:6, purple:12}, 0.40),
+  ];
+
+  function startNextWave(){
+    state.wave++;
+    const maker = waves[Math.min(state.wave-1, waves.length-1)];
+    state.spawnQueue = maker();
+    state.spawnTimer = 0;
+    updateHUD();
+    setTip(`Wave ${state.wave} started!`);
+  }
+
+  // ------- INPUT -------
+  function pointSegmentDistance(p,a,b){
+    const abx=b.x-a.x, aby=b.y-a.y, apx=p.x-a.x, apy=p.y-a.y;
+    const ab2=abx*abx+aby*aby; let t=(apx*abx+apy*aby)/(ab2||1); t=clamp(t,0,1);
+    const x=a.x+abx*t, y=a.y+aby*t; return Math.hypot(p.x-x,p.y-y);
+  }
+  function tooCloseToPath(p,minD){
+    for (let i=0;i<path.length-1;i++){ if (pointSegmentDistance(p,path[i],path[i+1])<minD) return true; }
+    return false;
+  }
+
+  canvas.addEventListener('click', (e)=>{
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX-rect.left, y = e.clientY-rect.top;
+
+    // 1) If clicked on an existing tower → try upgrade
+    for (const t of state.towers){
+      if (t.containsPoint(x,y)){
+        t.tryUpgrade();
+        return;
+      }
+    }
+
+    // 2) Else place a new tower (if you can afford and not on the path)
+    if (state.money < state.towerCost){
+      setTip('Not enough money');
+      return;
+    }
+    if (tooCloseToPath({x,y}, 30)){
+      setTip('Can’t build on the track');
+      return;
+    }
+
+    state.money -= state.towerCost;
+    state.towers.push(new Tower(x,y));
+    updateHUD();
+  });
+
+  window.addEventListener('keydown', (e)=>{
+    if (e.code==='Space'){ e.preventDefault(); startNextWave(); }
+  });
+  ui.startBtn.addEventListener('click', startNextWave);
+
+  // ------- HUD -------
+  function updateHUD(){
+    ui.moneyEl.textContent = state.money;
+    ui.livesEl.textContent = state.lives;
+    ui.waveEl.textContent = state.wave;
+  }
+
+  // ------- RENDERING -------
+  function drawBackground(){
+    // grid
+    ctx.save(); ctx.strokeStyle='#141824'; ctx.lineWidth=1;
+    for (let x=0;x<canvas.width;x+=32){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,canvas.height); ctx.stroke(); }
+    for (let y=0;y<canvas.height;y+=32){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(canvas.width,y); ctx.stroke(); }
+    ctx.restore();
+
+    // path ribbon
+    ctx.strokeStyle='#2e3a52'; ctx.lineWidth=36; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(path[0].x, path[0].y);
+    for (let i=1;i<path.length;i++) ctx.lineTo(path[i].x, path[i].y);
+    ctx.stroke();
+
+    // path border
+    ctx.strokeStyle='#1a2233'; ctx.lineWidth=40; ctx.globalAlpha=0.35;
+    ctx.beginPath(); ctx.moveTo(path[0].x, path[0].y);
+    for (let i=1;i<path.length;i++) ctx.lineTo(path[i].x, path[i].y);
+    ctx.stroke(); ctx.globalAlpha=1;
+  }
+
+  // ------- GAME LOOP -------
+  let last=performance.now();
+  function tick(now){
+    const dt = Math.min(0.033, (now-last)/1000); last=now;
+
+    // timed tip fade
+    if (tipTimer > 0){
+      tipTimer -= dt;
+      if (tipTimer <= 0){
+        ui.tipEl.textContent = 'Click empty map: place Tower ($50). Click a tower: Upgrade ($50). Purple bloons take 6 hits.';
+      }
+    }
+
+    // spawn logic
+    state.spawnTimer += dt;
+    while (state.spawnQueue.length && state.spawnTimer >= state.spawnQueue[0].delay){
+      const s = state.spawnQueue.shift();
+      const b = new Bloon(s.type);
+      state.bloons.push(b);
+    }
+
+    // updates
+    for (const t of state.towers) t.update(dt);
+    for (const d of state.darts) d.update(dt);
+    for (const b of state.bloons) b.update(dt);
+
+    // cleanup
+    state.darts = state.darts.filter(d=>d.alive);
+    state.bloons = state.bloons.filter(b=>b.alive);
+
+    // draw
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    drawBackground();
+    for (const t of state.towers) t.draw();
+    for (const d of state.darts) d.draw();
+    for (const b of state.bloons) b.draw();
+
+    updateHUD();
+    if (state.lives>0) requestAnimationFrame(tick);
+    else gameOver();
+  }
+  function gameOver(){
+    ctx.fillStyle='rgba(0,0,0,.6)'; ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.fillStyle='#fff'; ctx.textAlign='center';
+    ctx.font='bold 40px system-ui'; ctx.fillText('Game Over', canvas.width/2, canvas.height/2);
+  }
+
+  // start
+  updateHUD();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
