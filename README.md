@@ -1,3 +1,6 @@
+# Tower Defense V 2.2
+Added  increate tower price and tower limit so it is not as easy and implements "Sacrafices must be made" theme. 
+
 # Tower Defense V 2.1 
 Fixed issue that allowed spamming powerup(ice) and made balloons/balls have more hp, 
 making the game harder overall. 
