@@ -1,3 +1,7 @@
+# Tower Defense V 2.1 
+Fixed issue that allowed spamming powerup(ice) and made balloons/balls have more hp, 
+making the game harder overall. 
+
 # Tower Defense V 2.0 - MAJOR RELEASE! 
 MAJOR RELEASE!!! Remember to update game to latest version for bug fixes and new features. 
 Added Autoplay + Wave banner on start.
