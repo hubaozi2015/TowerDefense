@@ -1,3 +1,6 @@
+# Tower Defense V 2.3
+Added Ice Lightning Tank. Max towers +10 but dynamic difficulty based on tower amount above 10. 
+
 # Tower Defense V 2.2
 Added  increate tower price and tower limit so it is not as easy and implements "Sacrafices must be made" theme. 
 
