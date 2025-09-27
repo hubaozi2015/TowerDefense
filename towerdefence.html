@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Tower Defence – Multi Towers, Anti-Spam Waves, Rainbow/Zebra Bloons</title>
+<style>
+  html,body{margin:0;height:100%;background:#0e0f14;color:#eaeaea;font-family:system-ui,Arial,sans-serif}
+  #wrap{display:grid;place-items:center;height:100%;gap:12px}
+  #hud{display:flex;gap:14px;align-items:center;user-select:none;flex-wrap:wrap;justify-content:center}
+  .pill{background:#1a1d27;padding:8px 12px;border-radius:999px;border:1px solid #2a2f3f}
+  button{padding:8px 10px;border-radius:10px;border:1px solid #3a4257;background:#1e2433;color:#eaeaea;cursor:pointer}
+  button:disabled{opacity:.55;cursor:not-allowed}
+  canvas{background:#0b0d12;border:1px solid #2a2f3f;border-radius:12px;box-shadow:0 12px 30px rgba(0,0,0,.35)}
+  #tip{font-size:13px;opacity:.9}
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+  .tool{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:10px;border:1px solid #3a4257;background:#151b28}
+  .tool.active{outline:2px solid #6aa8ff}
+  .price{opacity:.85}
+  details{max-width:960px;margin:0 auto;color:#cfd6ea}
+  details summary{cursor:pointer;padding:6px 0;font-weight:600}
+  details .card{background:#111522;border:1px solid #232b40;border-radius:12px;padding:12px 14px}
+  details ul{margin:8px 0 0 18px}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="hud">
+    <div class="pill">💰 Money: <span id="money">200</span></div>
+    <div class="pill">❤️ Lives: <span id="lives">20</span></div>
+    <div class="pill">🌊 Wave: <span id="wave">0</span></div>
+    <button id="startWave">Start Wave (Space)</button>
+    <div id="tip">Build: Dart ($50), Sniper ($100), Cannon ($120). Click tower to upgrade ($50). <b>Purple from Wave 5</b>; Rainbow & Zebra later.</div>
+  </div>
+
+  <div class="toolbar">
+    <button class="tool active" data-type="dart">Dart <span class="price">($50)</span></button>
+    <button class="tool" data-type="sniper">Sniper <span class="price">($100)</span></button>
+    <button class="tool" data-type="cannon">Cannon <span class="price">($120)</span></button>
+  </div>
+
+  <canvas id="game" width="960" height="540"></canvas>
+
+  <details>
+    <summary>📘 Instructions</summary>
+    <div class="card">
+      <ul>
+        <li><b>Build:</b> click a build button (Dart/Sniper/Cannon), then click empty ground (not on the track & not too close to another tower).</li>
+        <li><b>Upgrade:</b> click an existing tower; if you have $50 it upgrades (bigger range, faster fire, more pierce). Tower turns orange and pulses.</li>
+        <li><b>Start Wave:</b> Space or button. Disabled while a wave is active (prevents spam).</li>
+        <li><b>Targeting:</b> towers aim at the bloon closest to the exit within their range (range ring is visible).</li>
+        <li><b>Bloons:</b> Green→Blue→Red downgrade. <b>Purple (6 HP)</b> starts Wave 5. <b>Rainbow (12 HP)</b>, <b>Zebra (25 HP)</b> appear later.</li>
+        <li><b>Lives:</b> Lose 1 life per bloon reaching the end. Game over at 0.</li>
+      </ul>
+    </div>
+  </details>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const ui = {
+    moneyEl: document.getElementById('money'),
+    livesEl: document.getElementById('lives'),
+    waveEl: document.getElementById('wave'),
+    startBtn: document.getElementById('startWave'),
+    tipEl: document.getElementById('tip'),
+    tools: Array.from(document.querySelectorAll('.tool')),
+  };
+
+  // ------- GAME STATE -------
+  const state = {
+    money: 200,
+    lives: 20,
+    wave: 0,
+    towers: [],
+    darts: [],
+    shells: [], // cannon projectiles
+    bloons: [],
+    popups: [],
+    spawnQueue: [],
+    spawnTimer: 0,
+    waveActive: false, // prevents spam
+    buildType: 'dart',
+  };
+
+  const COST = { dart:50, sniper:100, cannon:120 };
+  const UPGRADE_COST = 50;
+  const MIN_TOWER_GAP = 44; // px
+  let tipTimer = 0;
+
+  // ------- PATH (waypoints) -------
+  const path = [
+    {x:-40,y:270}, {x:120,y:270}, {x:240,y:180}, {x:360,y:360},
+    {x:480,y:180}, {x:600,y:360}, {x:760,y:270}, {x:1000,y:270}
+  ];
+
+  // ------- HELPERS -------
+  const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+  const dist  = (a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+  const lerp  = (a,b,t)=>a+(b-a)*t;
+  function setTip(msg, seconds=1.2){ ui.tipEl.textContent = msg; tipTimer = seconds; }
+  function addPopup(x,y,text,color='white',life=1.0){ state.popups.push(new Popup(x,y,text,color,life)); }
+
+  // ------- POPUP FLOATING TEXT -------
+  class Popup {
+    constructor(x,y,text,color='white',life=1.0){ this.x=x; this.y=y; this.text=text; this.color=color; this.life=life; this.maxLife=life; }
+    update(dt){ this.life -= dt; this.y -= 20*dt; }
+    draw(){
+      if (this.life<=0) return;
+      const a = clamp(this.life/this.maxLife,0,1);
+      ctx.save(); ctx.globalAlpha=a; ctx.fillStyle=this.color; ctx.font='bold 12px system-ui'; ctx.textAlign='center';
+      ctx.fillText(this.text,this.x,this.y); ctx.restore();
+    }
+    get alive(){ return this.life>0; }
+  }
+
+  // ------- BLOONS -------
+  const BloonInfo = {
+    red     : {draw:'solid',  color:'#ff4d5a', speed:70,  cash:1,  next:'none', radius:10},
+    blue    : {draw:'solid',  color:'#5bb8ff', speed:85,  cash:1,  next:'red',  radius:11},
+    green   : {draw:'solid',  color:'#73ff7b', speed:100, cash:1,  next:'blue', radius:12},
+    purple  : {draw:'solid',  color:'#b06cff', speed:110, cash:1,  hits:6, next:'none', radius:13}, // HP
+    rainbow : {draw:'rainbow',color:'#ffffff', speed:115, cash:1,  hits:12, next:'none', radius:13}, // multi-colour HP
+    zebra   : {draw:'zebra',  color:'#ffffff', speed:120, cash:1,  hits:25, next:'none', radius:14}, // black & white HP
+  };
+
+  class Bloon {
+    constructor(type='red'){
+      this.type = type;
+      this.info = BloonInfo[type];
+      this.seg = 0; this.t = 0; this.alive = true;
+      this.yJitter = (Math.random()*10-5);
+      this.hits = this.info.hits ? this.info.hits : 1;
+    }
+    get pos(){
+      const a = path[this.seg], b = path[this.seg+1] || a;
+      return { x: lerp(a.x,b.x,this.t), y: lerp(a.y,b.y,this.t)+this.yJitter };
+    }
+    update(dt){
+      if (!this.alive) return;
+      let remaining = this.info.speed*dt;
+      while (remaining > 0 && this.alive){
+        const a = path[this.seg], b = path[this.seg+1];
+        if (!b){ this.alive=false; state.lives = Math.max(0, state.lives-1); break; }
+        const segLen = Math.hypot(b.x-a.x, b.y-a.y);
+        const segLeft = (1-this.t)*segLen;
+        if (remaining < segLeft){ this.t += remaining/segLen; remaining=0; }
+        else { remaining -= segLeft; this.seg++; this.t=0; }
+      }
+    }
+    hit(damageLayers=1){
+      if (!this.alive) return;
+      for (let i=0;i<damageLayers;i++){
+        state.money += this.info.cash;
+        if (this.info.hits){ // HP-type
+          this.hits -= 1;
+          if (this.hits <= 0){ this.alive = false; return; }
+        } else {
+          if (this.info.next && this.info.next !== 'none'){
+            this.type = this.info.next; this.info = BloonInfo[this.type];
+            this.hits = this.info.hits ? this.info.hits : 1;
+          } else { this.alive = false; return; }
+        }
+      }
+    }
+    draw(){
+      const p = this.pos;
+      const r = this.info.radius;
+      if (this.info.draw === 'solid'){
+        ctx.fillStyle = this.info.color;
+        ctx.beginPath(); ctx.ellipse(p.x, p.y, r, r*0.85, 0, 0, Math.PI*2); ctx.fill();
+      } else if (this.info.draw === 'rainbow'){
+        // simple rainbow stripes
+        const colors = ['#ff4d5a','#ffa54d','#ffe24d','#73ff7b','#5bb8ff','#b06cff'];
+        for (let i=0;i<colors.length;i++){
+          ctx.fillStyle = colors[i];
+          ctx.beginPath();
+          ctx.ellipse(p.x, p.y, r - i*1.2, (r*0.85) - i*1.0, 0, 0, Math.PI*2);
+          ctx.fill();
+        }
+      } else if (this.info.draw === 'zebra'){
+        // black/white rings
+        for (let i=0;i<6;i++){
+          ctx.fillStyle = (i%2===0)?'#ffffff':'#111111';
+          ctx.beginPath();
+          ctx.ellipse(p.x, p.y, r - i*1.5, (r*0.85) - i*1.2, 0, 0, Math.PI*2);
+          ctx.fill();
+        }
+      }
+      // highlight & HP text for HP-type
+      ctx.fillStyle = 'rgba(255,255,255,.12)';
+      ctx.beginPath(); ctx.arc(p.x-4, p.y-4, 4, 0, Math.PI*2); ctx.fill();
+      if (this.info.hits){
+        ctx.fillStyle = 'rgba(255,255,255,.7)';
+        ctx.font = 'bold 11px system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText(String(this.hits), p.x, p.y+4);
+      }
+    }
+  }
+
+  // ------- TOWERS -------
+  class BaseTower {
+    constructor(x,y){
+      this.x=x; this.y=y;
+      this.range = 150;
+      this.fireRate = 3;
+      this.cooldown = 0;
+      this.pierce = 1;
+      this.projectileSpeed = 420;
+      this.color = '#6aa8ff';
+      this.upgraded = false;
+      this.highlightTimer = 0; // upgrade pulse
+      this.selectTimer = 0;    // selection ring
+    }
+    select(){ this.selectTimer = 0.6; }
+    tryUpgrade(){
+      if (this.upgraded){ addPopup(this.x,this.y-28,'Already upgraded','#cdd6ff'); return; }
+      if (state.money < UPGRADE_COST){ setTip('Not enough money'); addPopup(this.x,this.y-28,'Not enough money','#ffb3b3'); return; }
+      state.money -= UPGRADE_COST;
+      this.upgraded = true;
+      this.range += 35;
+      this.fireRate *= 1.5;
+      this.pierce += 1;
+      this.projectileSpeed += 80;
+      this.color = '#ff9f5a';
+      this.highlightTimer = 1.2;
+      updateHUD();
+      setTip('Tower upgraded!');
+      addPopup(this.x,this.y-28,'Upgraded!','#ffe29a');
+    }
+    targetEnemy(){
+      let best=null, bestProgress=-1;
+      for (const b of state.bloons){
+        if (!b.alive) continue;
+        const p = b.pos;
+        if (dist({x:this.x,y:this.y}, p) <= this.range){
+          const progress = b.seg + b.t;
+          if (progress > bestProgress){ best=b; bestProgress=progress; }
+        }
+      }
+      return best;
+    }
+    update(dt){
+      if (this.highlightTimer > 0) this.highlightTimer -= dt;
+      if (this.selectTimer > 0) this.selectTimer -= dt;
+      this.cooldown = Math.max(0, this.cooldown - dt);
+      if (this.cooldown>0) return;
+      const tgt = this.targetEnemy();
+      if (tgt){ this.fire(tgt); this.cooldown = 1/this.fireRate; }
+    }
+    drawBaseAndRange(){
+      // upgrade pulse
+      if (this.highlightTimer > 0){
+        const t = this.highlightTimer;
+        const a = clamp(t/1.2, 0, 1);
+        const pulse = 1 + Math.sin((1.2 - t) * 18) * 0.15;
+        ctx.save();
+        ctx.strokeStyle = `rgba(255,210,120,${0.55 * a})`;
+        ctx.lineWidth = 6 * pulse;
+        ctx.beginPath(); ctx.arc(this.x, this.y, 22 * pulse, 0, Math.PI*2); ctx.stroke();
+        ctx.restore();
+      }
+      // selection ring
+      if (this.selectTimer > 0){
+        const a = clamp(this.selectTimer/0.6, 0, 1);
+        ctx.save();
+        ctx.strokeStyle = `rgba(150,220,255,${0.7*a})`;
+        ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.arc(this.x, this.y, 20, 0, Math.PI*2); ctx.stroke();
+        ctx.restore();
+      }
+      // base
+      ctx.fillStyle = this.color;
+      ctx.beginPath(); ctx.arc(this.x,this.y,14,0,Math.PI*2); ctx.fill();
+      // range ring (always visible)
+      ctx.strokeStyle='rgba(200,220,255,0.10)'; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.arc(this.x,this.y,this.range,0,Math.PI*2); ctx.stroke();
+    }
+    containsPoint(px,py){ return Math.hypot(px-this.x, py-this.y) <= 16; }
+  }
+
+  class DartTower extends BaseTower {
+    constructor(x,y){
+      super(x,y);
+      this.range = 150; this.fireRate = 3.2; this.pierce = 1; this.projectileSpeed = 420;
+    }
+    fire(target){ state.darts.push(new Dart(this.x,this.y,target,this.projectileSpeed,this.pierce)); }
+    draw(){
+      this.drawBaseAndRange();
+      // barrel towards nearest
+      let tx=this.x+18, ty=this.y;
+      let nearest=null, nd=Infinity;
+      for (const b of state.bloons){ if (!b.alive) continue; const d=dist({x:this.x,y:this.y}, b.pos); if (d<nd){nd=d; nearest=b;} }
+      if (nearest){ const p=nearest.pos, ang=Math.atan2(p.y-this.y,p.x-this.x); tx=this.x+Math.cos(ang)*22; ty=this.y+Math.sin(ang)*22; }
+      ctx.strokeStyle='#cfe1ff'; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(this.x,this.y); ctx.lineTo(tx,ty); ctx.stroke();
+    }
+  }
+
+  class SniperTower extends BaseTower {
+    constructor(x,y){
+      super(x,y);
+      this.range = 900;            // long range (shows big ring)
+      this.fireRate = 1.2;         // slow
+      this.pierce = 1;
+      this.projectileSpeed = 900;  // very fast
+      this.color = '#9be0ff';
+    }
+    fire(target){ state.darts.push(new Dart(this.x,this.y,target,this.projectileSpeed,this.pierce)); }
+    draw(){ this.drawBaseAndRange(); /* thin barrel */ 
+      let tx=this.x+24, ty=this.y; 
+      let nearest=null, nd=Infinity;
+      for (const b of state.bloons){ if (!b.alive) continue; const d=dist({x:this.x,y:this.y}, b.pos); if (d<nd){nd=d; nearest=b;} }
+      if (nearest){ const p=nearest.pos, ang=Math.atan2(p.y-this.y,p.x-this.x); tx=this.x+Math.cos(ang)*28; ty=this.y+Math.sin(ang)*28; }
+      ctx.strokeStyle='#d5f2ff'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(this.x,this.y); ctx.lineTo(tx,ty); ctx.stroke();
+    }
+  }
+
+  class CannonTower extends BaseTower {
+    constructor(x,y){
+      super(x,y);
+      this.range = 180;
+      this.fireRate = 0.6;         // very slow
+      this.projectileSpeed = 360;
+      this.damage = 10;            // single target 10 dmg
+      this.color = '#b0a079';
+    }
+    tryUpgrade(){
+      // upgrade keeps idea: more range + a bit faster + more damage
+      if (this.upgraded){ addPopup(this.x,this.y-28,'Already upgraded','#cdd6ff'); return; }
+      if (state.money < UPGRADE_COST){ setTip('Not enough money'); addPopup(this.x,this.y-28,'Not enough money','#ffb3b3'); return; }
+      state.money -= UPGRADE_COST;
+      this.upgraded = true;
+      this.range += 40;
+      this.fireRate = 0.8; // a bit faster
+      this.damage = 14;
+      this.projectileSpeed += 40;
+      this.color = '#e5c98a';
+      this.highlightTimer = 1.2;
+      updateHUD();
+      setTip('Cannon upgraded!');
+      addPopup(this.x,this.y-28,'Upgraded!','#ffe29a');
+    }
+    fire(target){ state.shells.push(new Shell(this.x,this.y,target,this.projectileSpeed,this.damage)); }
+    draw(){ this.drawBaseAndRange(); /* short barrel */ 
+      let tx=this.x+16, ty=this.y;
+      let nearest=null, nd=Infinity;
+      for (const b of state.bloons){ if (!b.alive) continue; const d=dist({x:this.x,y:this.y}, b.pos); if (d<nd){nd=d; nearest=b;} }
+      if (nearest){ const p=nearest.pos, ang=Math.atan2(p.y-this.y,p.x-this.x); tx=this.x+Math.cos(ang)*20; ty=this.y+Math.sin(ang)*20; }
+      ctx.strokeStyle='#f0e0b0'; ctx.lineWidth=4; ctx.beginPath(); ctx.moveTo(this.x,this.y); ctx.lineTo(tx,ty); ctx.stroke();
+    }
+  }
+
+  // ------- PROJECTILES -------
+  class Dart {
+    constructor(x,y,target,speed,pierce){ this.x=x; this.y=y; this.target=target; this.speed=speed; this.pierce=pierce; this.alive=true; }
+    update(dt){
+      if (!this.alive) return;
+      if (!this.target || !this.target.alive){ this.alive=false; return; }
+      const p=this.target.pos, dx=p.x-this.x, dy=p.y-this.y, d=Math.hypot(dx,dy);
+      if (d<10){ this.target.hit(1); this.pierce--; if (this.pierce<=0) this.alive=false; return; }
+      const vx=(dx/d)*this.speed, vy=(dy/d)*this.speed; this.x+=vx*dt; this.y+=vy*dt;
+    }
+    draw(){ ctx.fillStyle='#ffd86a'; ctx.beginPath(); ctx.arc(this.x,this.y,3.5,0,Math.PI*2); ctx.fill(); }
+  }
+
+  class Shell {
+    constructor(x,y,target,speed,damage){ this.x=x; this.y=y; this.target=target; this.speed=speed; this.damage=damage; this.alive=true; }
+    update(dt){
+      if (!this.alive) return;
+      if (!this.target || !this.target.alive){ this.alive=false; return; }
+      const p=this.target.pos, dx=p.x-this.x, dy=p.y-this.y, d=Math.hypot(dx,dy);
+      if (d<12){ this.target.hit(this.damage); this.alive=false; addPopup(p.x,p.y-18,`-${this.damage}`,'#ffd86a',0.6); return; }
+      const vx=(dx/d)*this.speed, vy=(dy/d)*this.speed; this.x+=vx*dt; this.y+=vy*dt;
+    }
+    draw(){ ctx.fillStyle='#f0e0b0'; ctx.beginPath(); ctx.arc(this.x,this.y,5,0,Math.PI*2); ctx.fill(); }
+  }
+
+  // ------- WAVES (Purple from 5; Rainbow/Zebra later) -------
+  function waveDef(counts, gap=0.5){
+    const order = ['green','blue','red','purple','rainbow','zebra'];
+    const q=[]; let i=0;
+    for (const type of order){ const n = counts[type] || 0; for (let k=0;k<n;k++){ q.push({type, delay: i*gap}); i++; } }
+    return q;
+  }
+  const waves = [
+    ()=>waveDef({red:12}, 0.55),
+    ()=>waveDef({blue:10, red:6}, 0.50),
+    ()=>waveDef({green:8, blue:10}, 0.48),
+    ()=>waveDef({green:12, blue:12, red:4}, 0.45),
+    ()=>waveDef({green:14, blue:10, purple:4}, 0.44),                         // 5
+    ()=>waveDef({green:16, blue:12, purple:8}, 0.42),                          // 6
+    ()=>waveDef({green:10, blue:10, red:10, purple:6, rainbow:4}, 0.40),       // 7
+    ()=>waveDef({green:8, blue:10, purple:8, rainbow:8}, 0.38),                // 8
+    ()=>waveDef({blue:12, red:12, rainbow:10, zebra:4}, 0.36),                 // 9
+    ()=>waveDef({green:10, blue:10, purple:10, rainbow:10, zebra:8}, 0.34),    // 10
+  ];
+
+  function startNextWave(){
+    if (state.waveActive) return; // already active
+    state.wave++;
+    const maker = waves[Math.min(state.wave-1, waves.length-1)];
+    state.spawnQueue = maker();
+    state.spawnTimer = 0;
+    state.waveActive = true;
+    ui.startBtn.disabled = true;
+    updateHUD();
+    setTip(`Wave ${state.wave} started!`);
+  }
+
+  // wave considered active while: spawning or any bloons exist
+  function updateWaveActiveFlag(){
+    const spawning = state.spawnQueue.length > 0;
+    const anyBloons = state.bloons.length > 0;
+    const active = spawning || anyBloons;
+    state.waveActive = active;
+    ui.startBtn.disabled = active;
+  }
+
+  // ------- INPUT / BUILD -------
+  ui.tools.forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      ui.tools.forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      state.buildType = btn.dataset.type;
+    });
+  });
+
+  function pointSegmentDistance(p,a,b){
+    const abx=b.x-a.x, aby=b.y-a.y, apx=p.x-a.x, apy=p.y-a.y;
+    const ab2=abx*abx+aby*aby; let t=(apx*abx+apy*aby)/(ab2||1); t=clamp(t,0,1);
+    const x=a.x+abx*t, y=a.y+aby*t; return Math.hypot(p.x-x,p.y-y);
+  }
+  function tooCloseToPath(p,minD){
+    for (let i=0;i<path.length-1;i++){ if (pointSegmentDistance(p,path[i],path[i+1])<minD) return true; }
+    return false;
+  }
+  function tooCloseToOtherTowers(p, minGap){
+    for (const t of state.towers){ if (Math.hypot(p.x - t.x, p.y - t.y) < minGap) return true; }
+    return false;
+  }
+
+  canvas.addEventListener('click', (e)=>{
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX-rect.left, y = e.clientY-rect.top;
+
+    // click a tower → select & try upgrade
+    for (const t of state.towers){
+      if (t.containsPoint(x,y)){ t.select(); t.tryUpgrade(); return; }
+    }
+
+    // place
+    const cost = COST[state.buildType] ?? 50;
+    if (state.money < cost){ setTip('Not enough money'); return; }
+    const p = {x,y};
+    if (tooCloseToPath(p, 30)){ setTip('Can’t build on the track'); return; }
+    if (tooCloseToOtherTowers(p, MIN_TOWER_GAP)){ setTip('Towers must be farther apart'); return; }
+
+    state.money -= cost;
+    let t;
+    if (state.buildType==='dart')   t = new DartTower(x,y);
+    else if (state.buildType==='sniper') t = new SniperTower(x,y);
+    else if (state.buildType==='cannon') t = new CannonTower(x,y);
+    else t = new DartTower(x,y);
+    t.select();
+    state.towers.push(t);
+    addPopup(x,y-28,`-$${cost}`,'#ffd0d0');
+    updateHUD();
+  });
+
+  window.addEventListener('keydown', (e)=>{
+    if (e.code==='Space'){
+      e.preventDefault();
+      if (!state.waveActive) startNextWave();
+    }
+  });
+  ui.startBtn.addEventListener('click', ()=>{ if (!state.waveActive) startNextWave(); });
+
+  // ------- HUD -------
+  function updateHUD(){
+    ui.moneyEl.textContent = state.money;
+    ui.livesEl.textContent = state.lives;
+    ui.waveEl.textContent = state.wave;
+  }
+
+  // ------- RENDERING -------
+  function drawBackground(){
+    // grid
+    ctx.save(); ctx.strokeStyle='#141824'; ctx.lineWidth=1;
+    for (let x=0;x<canvas.width;x+=32){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,canvas.height); ctx.stroke(); }
+    for (let y=0;y<canvas.height;y+=32){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(canvas.width,y); ctx.stroke(); }
+    ctx.restore();
+    // path ribbon
+    ctx.strokeStyle='#2e3a52'; ctx.lineWidth=36; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(path[0].x, path[0].y); for (let i=1;i<path.length;i++) ctx.lineTo(path[i].x, path[i].y); ctx.stroke();
+    // path border
+    ctx.strokeStyle='#1a2233'; ctx.lineWidth=40; ctx.globalAlpha=0.35;
+    ctx.beginPath(); ctx.moveTo(path[0].x, path[0].y); for (let i=1;i<path.length;i++) ctx.lineTo(path[i].x, path[i].y); ctx.stroke(); ctx.globalAlpha=1;
+  }
+
+  // ------- GAME LOOP -------
+  let last=performance.now();
+  function tick(now){
+    const dt = Math.min(0.033, (now-last)/1000); last=now;
+
+    // timed tip reset
+    if (tipTimer > 0){ tipTimer -= dt; if (tipTimer <= 0){ ui.tipEl.textContent = 'Build: Dart ($50), Sniper ($100), Cannon ($120). Click tower to upgrade ($50). Purple from Wave 5; Rainbow & Zebra later.'; } }
+
+    // spawning
+    state.spawnTimer += dt;
+    while (state.spawnQueue.length && state.spawnTimer >= state.spawnQueue[0].delay){
+      const s = state.spawnQueue.shift();
+      state.bloons.push(new Bloon(s.type));
+    }
+
+    // updates
+    for (const t of state.towers) t.update(dt);
+    for (const d of state.darts) d.update(dt);
+    for (const s of state.shells) s.update(dt);
+    for (const b of state.bloons) b.update(dt);
+    for (const p of state.popups) p.update(dt);
+
+    // cleanup
+    state.darts  = state.darts.filter(d=>d.alive);
+    state.shells = state.shells.filter(s=>s.alive);
+    state.bloons = state.bloons.filter(b=>b.alive);
+    state.popups = state.popups.filter(p=>p.alive);
+
+    // draw
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    drawBackground();
+    for (const t of state.towers) t.draw();
+    for (const d of state.darts) d.draw();
+    for (const s of state.shells) s.draw();
+    for (const b of state.bloons) b.draw();
+    for (const p of state.popups) p.draw();
+
+    // wave button lock logic
+    updateWaveActiveFlag();
+
+    updateHUD();
+    if (state.lives>0) requestAnimationFrame(tick);
+    else gameOver();
+  }
+  function gameOver(){
+    ctx.fillStyle='rgba(0,0,0,.6)'; ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.font='bold 40px system-ui'; ctx.fillText('Game Over', canvas.width/2, canvas.height/2);
+  }
+
+  // start
+  updateHUD();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
