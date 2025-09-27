@@ -1,3 +1,11 @@
+# Tower Defense V 2.0 - MAJOR RELEASE! 
+MAJOR RELEASE!!! Remember to update game to latest version for bug fixes and new features. 
+Added Autoplay + Wave banner on start.
+New Ice powerup - 20$ - freezes all balloons for 1s. 
+Boss scales: 75 HP + 50 each 5 waves. 
+Boss health bar at top during boss fights.
+
+HUD reorganized to two lines; subtle map color boost.
 # Tower Defense V 1.3 
 Made getting coins 50% harder and added circles to the radius to show area. Added rainbow balloons. 
 
