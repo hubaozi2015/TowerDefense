@@ -1,3 +1,6 @@
+# Tower Defense V 2.3.1
+Bug Fixes for Lightning and Skip Level. 
+
 # Tower Defense V 2.3
 Added Ice Lightning Tank. Max towers +10 but dynamic difficulty based on tower amount above 10. 
 
