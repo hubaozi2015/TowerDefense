@@ -1,3 +1,9 @@
+# Tower Defense V 3.1
+Cash Balance: Coins per damage scale down after wave 5 and drop further on high-HP bloons—no more jackpot farming.
+Zebra Group: Now 5× 45 HP, dart-immune; spawns every 3 waves.
+Ice Balloon: New enemy — 60 HP, immune to cannon, lightning, and freeze; spawns every 5 waves.
+Sniper Upgrade Visual: Upgraded sniper now purple (stats unchanged).
+
 # Tower Defense V 3.0 - MAJOR RELEASE!
 Boss health increased, new baloons/balls only can be killed by specific tanks. Changes to max tank limits by sacrificing health for more tanks. 
 
