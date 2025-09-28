@@ -1,4 +1,7 @@
 # Tower Defense V 2.3.1
+New balls/balloon immune to darts and snipers 
+
+# Tower Defense V 2.3.1
 Bug Fixes for Lightning and Skip Level. 
 
 # Tower Defense V 2.3
