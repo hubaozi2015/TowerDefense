@@ -1,3 +1,6 @@
+# Tower Defense V 3.5
+Changed sniper abilities and machine gun as an upgrade option for dart. 
+
 # Tower Defense V 3.2
 Added machine gun, more upgrade options. 
 
