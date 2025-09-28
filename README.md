@@ -1,3 +1,6 @@
+# Tower Defense V 3.2
+Added machine gun, more upgrade options. 
+
 # Tower Defense V 3.1
 Cash Balance: Coins per damage scale down after wave 5 and drop further on high-HP bloons—no more jackpot farming.
 Zebra Group: Now 5× 45 HP, dart-immune; spawns every 3 waves.
