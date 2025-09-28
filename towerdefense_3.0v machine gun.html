@@ -1,0 +1,833 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Tower Defence</title>
+<style>
+  html,body{margin:0;height:100%;background:#0e0f14;color:#eaeaea;font-family:system-ui,Arial,sans-serif}
+  #wrap{display:grid;place-items:center;height:100%;gap:10px}
+  #hudRow1,#hudRow2{display:flex;gap:12px;align-items:center;user-select:none;flex-wrap:wrap;justify-content:center;max-width:1100px}
+  .pill{background:#1a1d27;padding:8px 12px;border-radius:999px;border:1px solid #2a2f3f}
+  button{padding:8px 10px;border-radius:10px;border:1px solid #3a4257;background:#1e2433;color:#eaeaea;cursor:pointer}
+  button:disabled{opacity:.55;cursor:not-allowed}
+  .toggle{padding:6px 10px;border-radius:999px;border:1px solid #3a4257;background:#161c2a}
+  .toggle.on{outline:2px solid #6aa8ff}
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;align-items:center}
+  .tool{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:10px;border:1px solid #3a4257;background:#151b28}
+  .tool.active{outline:2px solid #6aa8ff}
+  .price{opacity:.9}
+  .sep{width:1px;height:26px;background:#3a4257;opacity:.6;margin:0 4px;border-radius:1px}
+  canvas{background:#0b0d12;border:1px solid #2a2f3f;border-radius:12px;box-shadow:0 12px 30px rgba(0,0,0,.35)}
+  #tip{font-size:13px;opacity:.9}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <!-- HUD Row 1 -->
+  <div id="hudRow1">
+    <div class="pill">💰 Money: <span id="money">150</span></div>
+    <div class="pill">❤️ Lives: <span id="lives">100</span></div>
+    <div class="pill">🌊 Wave: <span id="wave">0</span></div>
+    <div class="pill">🗼 Towers Left: <span id="towersLeft">20</span> / <span id="towersMax">20</span></div>
+    <button id="startWave">Start Wave (Space)</button>
+    <button id="autoplay" class="toggle">Autoplay: OFF</button>
+    <button id="skipWave">⏭ Skip Wave ($100)</button>
+    <button id="buySlot">➕ Slot (-5❤)</button>
+  </div>
+
+  <!-- HUD Row 2 -->
+  <div id="hudRow2">
+    <div class="toolbar">
+      <button class="tool active" data-type="dart"   id="btnDart">Dart <span class="price">(…)</span></button>
+      <button class="tool"         data-type="sniper" id="btnSniper">Sniper <span class="price">(…)</span></button>
+      <button class="tool"         data-type="cannon" id="btnCannon">Cannon <span class="price">(…)</span></button>
+      <button class="tool" data-type="machine" id="btnMachine">Machine Gun <span class="price">(…)</span></button>
+      <button class="tool"         data-type="lightning" id="btnLightning">⚡ Lightning <span class="price">(…)</span></button>
+      <div class="sep"></div>
+      <button id="iceBtn">❄ Ice ($20)</button>
+      <button id="payWithLives" class="toggle">Pay w/ Lives: OFF</button>
+    </div>
+    <div id="tip" class="pill">
+      Max starts at 20 towers. Buy extra slot for 5 ❤ (up to 40). Pay w/ Lives places a tower for 5 ❤. ❄ Ice: 2s cap, 10s CD. ⏭ Skip: $100, 10s CD + 3-wave lock.
+      Every 3rd wave: dart-immune 30HP reds. Prices +$5 every 5 waves. Boss every 5 waves. Leaks deal ceil(HP/2) damage. Lightning lasts 3 waves.
+      Every 3rd wave: dart-immune 30HP reds. Prices +$5 every 5 waves. Boss every 5 waves. Leaks deal ceil(HP/2) damage. Lightning lasts 3 waves.
+    </div>
+  </div>
+
+  <canvas id="game" width="960" height="540"></canvas>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const ui = {
+    moneyEl: document.getElementById('money'),
+    livesEl: document.getElementById('lives'),
+    waveEl: document.getElementById('wave'),
+    towersLeftEl: document.getElementById('towersLeft'),
+    towersMaxEl: document.getElementById('towersMax'),
+    startBtn: document.getElementById('startWave'),
+    tipEl: document.getElementById('tip'),
+    iceBtn: document.getElementById('iceBtn'),
+    autoplayBtn: document.getElementById('autoplay'),
+    skipBtn: document.getElementById('skipWave'),
+    buySlotBtn: document.getElementById('buySlot'),
+    payWithLivesBtn: document.getElementById('payWithLives'),
+    tools: Array.from(document.querySelectorAll('.tool')),
+    btnDart: document.getElementById('btnDart'),
+    btnSniper: document.getElementById('btnSniper'),
+    btnMachine: document.getElementById('btnMachine'),
+    btnCannon: document.getElementById('btnCannon'),
+    btnLightning: document.getElementById('btnLightning'),
+  };
+
+  const state = {
+    money: 150, lives: 100, wave: 0,
+    towers: [], darts: [], shells: [], lightnings: [], bloons: [], popups: [],
+    spawnQueue: [], spawnTimer: 0, waveActive: false, buildType: 'dart', autoplay: false,
+    freezeTimer: 0, iceCooldown: 0, skipCooldown: 0, skipWaveLock: 0,
+    waveBannerTimer: 0, bossWarnActive: false, bossWarnTimer: 0, _autoQueued: false,
+    sellPrompt: null, extraDifficulty: 0,
+    maxTowers: 20,              // dynamic cap (can be increased by Buy Slot)
+    payWithLives: false,        // place towers using 5 lives instead of money
+  };
+
+  const MONEY_RATE=0.5;
+  const COST={dart:50,sniper:100,cannon:120,machine:200,lightning:200,ice:20};
+  const UPGRADE_COST=50, MIN_TOWER_GAP=44, SKIP_COST=100, LIFE_COST=200;
+  const LIFE_MAX=99, MAX_SLOTS_CAP=40; // soft cap for bought slots
+  let tipTimer=0, dtGlobal=0;
+
+  function getTowerCost(type){
+    const base=COST[type]??0;
+    if(type==='ice')return base;
+    const inc=5*Math.floor(state.wave/5);
+    return base+inc;
+  }
+  function refreshToolLabels(){
+    ui.btnDart.querySelector('.price').textContent=`($${getTowerCost('dart')})`;
+    ui.btnSniper.querySelector('.price').textContent=`($${getTowerCost('sniper')})`;
+    ui.btnCannon.querySelector('.price').textContent=`($${getTowerCost('cannon')})`;
+    ui.btnMachine.querySelector('.price').textContent=`($${getTowerCost('machine')})`;
+    ui.btnLightning.querySelector('.price').textContent=`($${getTowerCost('lightning')})`;
+  }
+  const path=[{x:-40,y:270},{x:120,y:270},{x:240,y:180},{x:360,y:360},{x:480,y:180},{x:600,y:360},{x:760,y:270},{x:1000,y:270}];
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+  const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+  const lerp=(a,b,t)=>a+(b-a)*t;
+  function setTip(m,s=1.4){ui.tipEl.textContent=m;tipTimer=s;}
+  function addPopup(x,y,t,c='white',life=1){state.popups.push(new Popup(x,y,t,c,life));}
+  function angleBetween(ax,ay,bx,by){return Math.atan2(by-ay,bx-ax);}
+  function angleDiff(a,b){let d=a-b;while(d>Math.PI)d-=2*Math.PI;while(d<-Math.PI)d+=2*Math.PI;return Math.abs(d);}
+
+  class Popup{
+    constructor(x,y,text,color='white',life=1){this.x=x;this.y=y;this.text=text;this.color=color;this.life=life;this.maxLife=life;}
+    update(dt){this.life-=dt;this.y-=20*dt;}
+    draw(){if(this.life<=0)return;const a=clamp(this.life/this.maxLife,0,1);ctx.save();ctx.globalAlpha=a;ctx.fillStyle=this.color;ctx.font='bold 12px system-ui';ctx.textAlign='center';ctx.fillText(this.text,this.x,this.y);ctx.restore();}
+    get alive(){return this.life>0;}
+  }
+
+  const BloonInfo={
+    red:{draw:'solid',color:'#ff4d5a',speed:70,cash:1,next:'none',radius:10},
+    blue:{draw:'solid',color:'#5bb8ff',speed:85,cash:1,next:'red',radius:11},
+    green:{draw:'solid',color:'#73ff7b',speed:100,cash:1,next:'blue',radius:12},
+    purple:{draw:'solid',color:'#b06cff',speed:110,cash:1,hits:6,next:'none',radius:13},
+    rainbow:{draw:'rainbow',color:'#ffffff',speed:115,cash:1,hits:12,next:'none',radius:13},
+    zebra:{draw:'zebra',color:'#ffffff',speed:120,cash:1,hits:25,next:'none',radius:14},
+    zred30:{draw:'solid',color:'#cc2b2b',speed:85,cash:1,hits:30,next:'none',radius:13, dartImmune:true},
+    boss:{draw:'boss',color:'#ff3b3b',speed:85,cash:3,hits:300,next:'none',radius:18}
+  };
+  function perWaveBonusHP(w){const base=Math.max(0,w-1);const extra5=Math.floor(w/5)*3;return base+extra5;}
+
+  class Bloon{
+    constructor(type='red',opts={}){
+      this.type=type; this.info=BloonInfo[type];
+      this.seg=0; this.t=0; this.alive=true; this.yJitter=(Math.random()*10-5);
+      const bonus=opts.bonusHP||0;
+      this.immune = { dart: !!(opts.dartImmune || this.info.dartImmune) };
+      if(type==='boss'||this.info.hits){
+        const fixed = (opts.fixedHP!=null)?opts.fixedHP:null;
+        this.hits = (fixed!=null)? fixed : ((opts.hits??this.info.hits) + bonus);
+        this.tailHP=0;
+      } else {
+        this.hits=1; this.tailHP=bonus;
+      }
+      this._maxHits=(this.info.hits?this.hits:this.hits+this.tailHP);
+    }
+    get pos(){const a=path[this.seg],b=path[this.seg+1]||a;return{x:lerp(a.x,b.x,this.t),y:lerp(a.y,b.y,this.t)+this.yJitter};}
+    leakDamage(){
+      let rem;
+      if (this.info.hits || this.type === 'boss') rem = this.hits;
+      else if (!this.info.next || this.info.next==='none') rem = 1 + (this.tailHP||0);
+      else rem = 1;
+      return Math.max(1, Math.ceil(rem/2));
+    }
+    update(dt){
+      if(!this.alive)return;
+      if(state.freezeTimer>0)return;
+      let rem=this.info.speed*dt;
+      while(rem>0&&this.alive){
+        const a=path[this.seg],b=path[this.seg+1];
+        if(!b){
+          const dmg=this.leakDamage();
+          this.alive=false;
+          state.lives=Math.max(0,state.lives-dmg);
+          addPopup(canvas.width-72,84,`-${dmg} ❤`,'#ffb3b3',0.9);
+          break;
+        }
+        const len=Math.hypot(b.x-a.x,b.y-a.y),left=(1-this.t)*len;
+        if(rem<left){this.t+=rem/len;rem=0;}else{rem-=left;this.seg++;this.t=0;}
+      }
+    }
+    hit(dmg=1){
+      if(!this.alive)return;
+      for(let i=0;i<dmg;i++){
+        state.money+=this.info.cash*MONEY_RATE;
+        if(this.info.hits||this.type==='boss'){
+          this.hits--; if(this.hits<=0){this.alive=false;return;}
+        } else {
+          if(this.info.next&&this.info.next!=='none'){
+            this.type=this.info.next; this.info=BloonInfo[this.type]; this.hits=this.info.hits?this.info.hits:1;
+          } else {
+            if(this.tailHP>0) this.tailHP--; else { this.alive=false; return; }
+          }
+        }
+      }
+    }
+    draw(){
+      const p=this.pos,r=this.info.radius;
+      if(this.info.draw==='solid'){
+        ctx.fillStyle=this.info.color;ctx.beginPath();ctx.ellipse(p.x,p.y,r,r*0.85,0,0,Math.PI*2);ctx.fill();
+        if(this.immune.dart){ ctx.strokeStyle='rgba(255,255,255,0.55)'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(p.x,p.y,r+1,0,Math.PI*2); ctx.stroke(); }
+      } else if(this.info.draw==='rainbow'){
+        const cs=['#ff4d5a','#ffa54d','#ffe24d','#73ff7b','#5bb8ff','#b06cff'];
+        for(let i=0;i<cs.length;i++){ctx.fillStyle=cs[i];ctx.beginPath();ctx.ellipse(p.x,p.y,r-i*1.2,(r*0.85)-i*1.0,0,0,Math.PI*2);ctx.fill();}
+      } else if(this.info.draw==='zebra'){
+        for(let i=0;i<6;i++){ctx.fillStyle=(i%2===0)?'#ffffff':'#111';ctx.beginPath();ctx.ellipse(p.x,p.y,r-i*1.5,(r*0.85)-i*1.2,0,0,Math.PI*2);ctx.fill();}
+      } else if(this.info.draw==='boss'){
+        ctx.fillStyle=this.info.color;ctx.beginPath();ctx.ellipse(p.x,p.y,r,r*0.9,0,0,Math.PI*2);ctx.fill();
+        ctx.strokeStyle='#3a0d0d';ctx.lineWidth=3;ctx.beginPath();ctx.ellipse(p.x,p.y,r,r*0.9,0,0,Math.PI*2);ctx.stroke();
+      }
+      if(state.freezeTimer>0){ctx.fillStyle='rgba(150,200,255,0.25)';ctx.beginPath();ctx.ellipse(p.x,p.y,r+1,r*0.9+1,0,0,Math.PI*2);ctx.fill();}
+      let show=null;if(this.info.hits||this.type==='boss')show=this.hits;else if(!this.info.next||this.info.next==='none')show=this.tailHP;
+      if(show!==null&&show>0){ctx.fillStyle='rgba(255,255,255,.85)';ctx.font='bold 11px system-ui';ctx.textAlign='center';ctx.fillText(String(show),p.x,p.y+4);}
+    }
+  }
+
+  class BaseTower{
+    constructor(x,y){this.x=x;this.y=y;this.range=150;this.fireRate=3;this.cooldown=0;this.pierce=1;this.projectileSpeed=420;this.color='#6aa8ff';this.upgraded=false;this.highlightTimer=0;this.selectTimer=0;this.buyTotal=0;this.type='base';}
+    select(){this.selectTimer=0.6;}
+    tryUpgrade(){
+      if(this.upgraded){addPopup(this.x,this.y-28,'Already upgraded','#cdd6ff');return;}
+      if(state.money<UPGRADE_COST){setTip('Not enough money');addPopup(this.x,this.y-28,'Not enough money','#ffb3b3');return;}
+      state.money-=UPGRADE_COST;this.buyTotal+=UPGRADE_COST;this.upgraded=true;this.range+=35;this.fireRate*=1.5;this.pierce+=1;this.projectileSpeed+=80;this.color='#ff9f5a';this.highlightTimer=1.2;updateHUD();setTip('Tower upgraded!');addPopup(this.x,this.y-28,'Upgraded!','#ffe29a');
+    }
+    containsPoint(px,py){return Math.hypot(px-this.x,py-this.y)<=16;}
+    targetEnemy(){let best=null,prog=-1;for(const b of state.bloons){if(!b.alive)continue;const p=b.pos;if(dist({x:this.x,y:this.y},p)<=this.range){const pr=b.seg+b.t;if(pr>prog){best=b;prog=pr;}}}return best;}
+    update(dt){if(this.highlightTimer>0)this.highlightTimer-=dt;if(this.selectTimer>0)this.selectTimer-=dt;this.cooldown=Math.max(0,this.cooldown-dt);if(this.cooldown>0)return;const tgt=this.targetEnemy();if(tgt){this.fire(tgt);this.cooldown=1/this.fireRate;}}
+    drawBaseAndRange(){
+      if(this.highlightTimer>0){const t=this.highlightTimer,a=clamp(t/1.2,0,1),pulse=1+Math.sin((1.2-t)*18)*0.15;ctx.save();ctx.strokeStyle=`rgba(255,210,120,${0.55*a})`;ctx.lineWidth=6*pulse;ctx.beginPath();ctx.arc(this.x,this.y,22*pulse,0,Math.PI*2);ctx.stroke();ctx.restore();}
+      if(this.selectTimer>0){const a=clamp(this.selectTimer/0.6,0,1);ctx.save();ctx.strokeStyle=`rgba(150,220,255,${0.7*a})`;ctx.lineWidth=3;ctx.beginPath();ctx.arc(this.x,this.y,20,0,Math.PI*2);ctx.stroke();ctx.restore();}
+      ctx.fillStyle=this.color;ctx.beginPath();ctx.arc(this.x,this.y,14,0,Math.PI*2);ctx.fill();
+      ctx.strokeStyle='rgba(200,220,255,0.10)';ctx.lineWidth=1;ctx.beginPath();ctx.arc(this.x,this.y,this.range,0,Math.PI*2);ctx.stroke();
+    }
+  }
+  class DartTower extends BaseTower{
+    constructor(x,y){super(x,y);this.type='dart';this.range=150;this.fireRate=2.5;this.pierce=1;this.projectileSpeed=420;}
+    fire(t){state.darts.push(new Dart(this.x,this.y,t,this.projectileSpeed,this.pierce));}
+    draw(){this.drawBaseAndRange();}
+  }
+  class SniperTower extends BaseTower{
+    constructor(x,y){super(x,y);this.type='sniper';this.range=900;this.fireRate=1.0;this.pierce=3;this.projectileSpeed=900;this.color='#9be0ff';}
+    fire(t){state.darts.push(new Dart(this.x,this.y,t,this.projectileSpeed,this.pierce));}
+    draw(){this.drawBaseAndRange();}
+    tryUpgrade(){
+  // keep the exact same upgrade logic/stats from BaseTower
+    super.tryUpgrade();
+  // but override the color to purple after a successful upgrade
+    if (this.upgraded) {
+      this.color = '#b06cff'; // purple
+  }
+}
+
+  }
+  class CannonTower extends BaseTower{
+    constructor(x,y){super(x,y);this.type='cannon';this.range=180;this.fireRate=0.4;this.projectileSpeed=360;this.damage=20;this.color='#b0a079';}
+    tryUpgrade(){
+      if(this.upgraded){addPopup(this.x,this.y-28,'Already upgraded','#cdd6ff');return;}
+      if(state.money<300){setTip('Not enough money');addPopup(this.x,this.y-28,'Not enough money','#ffb3b3');return;}
+      state.money-=300;this.buyTotal+=300;this.upgraded=true;this.range+=40;this.fireRate=0.5;this.damage=30;this.projectileSpeed+=40;this.color='#e5c98a';this.highlightTimer=1.2;updateHUD();setTip('Cannon upgraded!');addPopup(this.x,this.y-28,'Upgraded!','#ffe29a');
+    }
+    fire(t){state.shells.push(new Shell(this.x,this.y,t,this.projectileSpeed,this.damage));}
+    draw(){this.drawBaseAndRange();}
+  }
+  class MachineTower extends BaseTower{ constructor(x,y){ super(x,y); this.range=100; this.fireRate=8; this.pierce=1; this.projectileSpeed=540; this.color='#a3a19b'; }
+  tryUpgrade(){
+      if(this.upgraded){addPopup(this.x,this.y-28,'Already upgraded','#cdd6ff');return;}
+      if(state.money<200){setTip('Not enough money');addPopup(this.x,this.y-28,'Not enough money','#ffb3b3');return;}
+      state.money-=200;this.buyTotal+=200;this.upgraded=true;this.range+=40;this.fireRate=10;this.damage=1.5;this.projectileSpeed+=40;this.color='#4d4d4d';this.highlightTimer=1.2;updateHUD();setTip('Machine gun upgraded!');addPopup(this.x,this.y-28,'Upgraded!','#ffe29a');
+    }
+  fire(target){ state.darts.push(new Dart(this.x,this.y,target,this.projectileSpeed,this.pierce)); } draw(){ this.drawBaseAndRange(); let tx=this.x+20,ty=this.y,nearest=null,nd=Infinity; for(const b of state.bloons){ if(!b.alive)continue; const d=dist({x:this.x,y:this.y},b.pos); if(d<nd){nd=d; nearest=b;} } if(nearest){ const p=nearest.pos,ang=Math.atan2(p.y-this.y,p.x-this.x); tx=this.x+Math.cos(ang)*20; ty=this.y+Math.sin(ang)*20; } ctx.strokeStyle='#d5f2ff'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(this.x,this.y); ctx.lineTo(tx,ty); ctx.stroke(); } }
+  class LightningTower extends BaseTower{
+    constructor(x,y){super(x,y);this.type='lightning';this.range=220;this.fireRate=1.0;this.chainCount=5;this.chainRange=90;this.damageLayers=3;this.color='#8ef5ff';this.wavesLeft=3;this.facing=0;}
+    targetEnemy(){
+      const cone=Math.PI/3;let best=null,prog=-1;
+      for(const b of state.bloons){
+        if(!b.alive)continue;const p=b.pos;const d=dist({x:this.x,y:this.y},p);if(d>this.range)continue;
+        const ang=angleBetween(this.x,this.y,p.x,p.y);
+        if(angleDiff(ang,this.facing)<cone){const pr=b.seg+b.t;if(pr>prog){best=b;prog=pr;}}
+      }
+      if(!best){
+        let nearest=null,nd=Infinity;
+        for(const b of state.bloons){if(!b.alive)continue;const p=b.pos;const d=dist({x:this.x,y:this.y},p);if(d<this.range && d<nd){nd=d;nearest=b;}}
+        if(nearest){const p=nearest.pos;this.facing=angleBetween(this.x,this.y,p.x,p.y);}
+      }
+      return best;
+    }
+    tryUpgrade(){
+      if(this.upgraded){addPopup(this.x,this.y-28,'Already upgraded','#cdd6ff');return;}
+      if(state.money<500){setTip('Not enough money');addPopup(this.x,this.y-28,'Not enough money','#ffb3b3');return;}
+      state.money-=500;this.buyTotal+=500;this.upgraded=true;this.chainCount+=3;this.damageLayers+=5;this.range+=30;this.highlightTimer=1.2;this.color='#5fe0ff';updateHUD();setTip('Lightning upgraded!');addPopup(this.x,this.y-28,'Upgraded!','#bff8ff');
+    }
+    fire(t){const p=t.pos;this.facing=angleBetween(this.x,this.y,p.x,p.y);state.lightnings.push(new Lightning(this.x,this.y,t,this.chainCount,this.chainRange,this.damageLayers,this.facing));}
+    draw(){
+      this.drawBaseAndRange();
+      const ax=this.x+Math.cos(this.facing)*(this.range-8),ay=this.y+Math.sin(this.facing)*(this.range-8);
+      ctx.save();ctx.globalAlpha=0.25;ctx.strokeStyle='#8fd8ff';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(this.x,this.y);ctx.lineTo(ax,ay);ctx.stroke();ctx.restore();
+      ctx.strokeStyle='#bffeff';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(this.x,this.y);ctx.lineTo(this.x+18,this.y-6);ctx.stroke();ctx.beginPath();ctx.moveTo(this.x,this.y);ctx.lineTo(this.x+18,this.y+6);ctx.stroke();
+      ctx.fillStyle='#9be7ff';ctx.font='bold 11px system-ui';ctx.textAlign='center';ctx.fillText(`⚡${this.wavesLeft}`,this.x,this.y-20);
+    }
+  }
+
+  class Dart{
+    constructor(x,y,t,s,p){this.x=x;this.y=y;this.target=t;this.speed=s;this.pierce=p;this.alive=true;}
+    update(dt){
+      if(!this.alive)return;
+      if(!this.target||!this.target.alive){this.alive=false;return;}
+      const p=this.target.pos,dx=p.x-this.x,dy=p.y-this.y,d=Math.hypot(dx,dy);
+      if(d<10){
+        if(this.target.immune && this.target.immune.dart){
+          addPopup(p.x,p.y-16,'Immune','#ffd0d0',0.6);
+          this.alive=false; return;
+        }
+        this.target.hit(1); this.pierce--; if(this.pierce<=0)this.alive=false; return;
+      }
+      const vx=(dx/d)*this.speed,vy=(dy/d)*this.speed; this.x+=vx*dt; this.y+=vy*dt;
+    }
+    draw(){ctx.fillStyle='#ffd86a';ctx.beginPath();ctx.arc(this.x,this.y,3.5,0,Math.PI*2);ctx.fill();}
+  }
+  class Shell{
+    constructor(x,y,t,s,damage){this.x=x;this.y=y;this.target=t;this.speed=s;this.damage=damage;this.alive=true;}
+    update(dt){
+      if(!this.alive)return;
+      if(!this.target||!this.target.alive){this.alive=false;return;}
+      const p=this.target.pos,dx=p.x-this.x,dy=p.y-this.y,d=Math.hypot(dx,dy);
+      if(d<12){ this.target.hit(this.damage); this.alive=false; addPopup(p.x,p.y-18,`-${this.damage}`,'#ffd86a',0.6); return; }
+      const vx=(dx/d)*this.speed,vy=(dy/d)*this.speed; this.x+=vx*dt; this.y+=vy*dt;
+    }
+    draw(){ctx.fillStyle='#f0e0b0';ctx.beginPath();ctx.arc(this.x,this.y,5,0,Math.PI*2);ctx.fill();}
+  }
+  class Lightning{
+    constructor(x,y,target,chains,chainRange,damageLayers,facing){
+      this.x=x; this.y=y; this.target=target; this.chains=chains; this.chainRange=chainRange; this.damageLayers=damageLayers;
+      this.facing=facing; this.points=[{x,y}]; this.life=0.15; this._hitSet=new Set(); this.didDamage=false;
+    }
+    update(dt){
+      if(!this.didDamage){
+        let current=this.target, remaining=this.chains;
+        const cone=Math.PI/3;
+        while(remaining>0 && current){
+          const p=current.pos;
+          if(!this._hitSet.has(current)){ current.hit(this.damageLayers); this._hitSet.add(current); }
+          this.points.push({x:p.x,y:p.y});
+          let next=null, nd=Infinity;
+          for(const b of state.bloons){
+            if(!b.alive || this._hitSet.has(b)) continue;
+            const bp=b.pos, d=dist(p,bp);
+            const ang=angleBetween(this.x,this.y,bp.x,bp.y);
+            if(d<=this.chainRange && angleDiff(ang,this.facing)<cone){ if(d<nd){nd=d; next=b;} }
+          }
+          current=next; remaining--;
+        }
+        this.didDamage=true;
+      }
+      this.life-=dt;
+    }
+    get alive(){ return this.life>0; }
+    draw(){
+      if(this.points.length<2) return;
+      const alpha=clamp(this.life/0.15,0,1);
+      ctx.save();
+      ctx.globalAlpha=0.85*alpha; ctx.strokeStyle='#bffeff'; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.moveTo(this.points[0].x,this.points[0].y);
+      for(let i=1;i<this.points.length;i++){
+        const a=this.points[i-1], b=this.points[i];
+        const midx=(a.x+b.x)/2+(Math.random()*8-4), midy=(a.y+b.y)/2+(Math.random()*8-4);
+        ctx.lineTo(midx,midy); ctx.lineTo(b.x,b.y);
+      }
+      ctx.stroke();
+      ctx.globalAlpha=0.35*alpha; ctx.lineWidth=5; ctx.strokeStyle='#5ecbff'; ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function waveDef(counts,gap=0.5){
+    const order=['green','blue','red','purple','rainbow','zebra'];
+    const q=[]; let i=0;
+    for(const type of order){const n=counts[type]||0; for(let k=0;k<n;k++){ q.push({type,delay:i*gap}); i++; }}
+    return q;
+  }
+  const waves=[
+    ()=>waveDef({red:12},0.55),
+    ()=>waveDef({blue:10,red:6},0.50),
+    ()=>waveDef({green:8,blue:10},0.48),
+    ()=>waveDef({green:12,blue:12,red:4},0.45),
+    ()=>waveDef({green:14,blue:10,purple:4},0.44),
+    ()=>waveDef({green:16,blue:12,purple:8},0.42),
+    ()=>waveDef({green:10,blue:10,red:10,purple:6,rainbow:4},0.40),
+    ()=>waveDef({green:8,blue:10,purple:8,rainbow:8},0.38),
+    ()=>waveDef({blue:12,red:12,rainbow:10,zebra:4},0.36),
+    ()=>waveDef({green:10,blue:10,purple:10,rainbow:10,zebra:8},0.34)
+  ];
+  function bossHPForWave(w){const n=Math.floor(w/5);if(n<=0)return 300;return 300+(n-1)*500;}
+  function attachBossToQueueIfNeeded(q){
+    if(state.wave%5!==0) return q;
+    const last=q.length?q[q.length-1].delay:0;
+    q.push({type:'boss',delay:last+3.0,hp:bossHPForWave(state.wave)+state.extraDifficulty});
+    return q;
+  }
+  function attachZebraGroupEvery3(q){
+    if(state.wave%3!==0) return q;
+    const last=q.length?q[q.length-1].delay:0;
+    const gap=0.35;
+    for(let i=1;i<=5;i++){
+      q.push({type:'zred30', delay:last + i*gap, fixedHP:50, dartImmune:true});
+    }
+    return q;
+  }
+
+  function startNextWave(){
+    if(state.waveActive) return;
+
+    // Lightning lifetime (expires after 3 waves)
+    for(let i=state.towers.length-1;i>=0;i--){
+      const t=state.towers[i];
+      if(t.type==='lightning'){
+        t.wavesLeft--;
+        if(t.wavesLeft<=0){ addPopup(t.x,t.y-18,'⚡ expired','#bffeff',1.2); state.towers.splice(i,1); }
+      }
+    }
+
+    // dynamic difficulty: +1 HP per tower above 10 (capped at +10)
+    state.extraDifficulty = Math.max(0, Math.min(10, state.towers.length - 10));
+
+    state.wave++;
+    const maker=waves[Math.min(state.wave-1,waves.length-1)];
+    let q=maker();
+
+    const base=perWaveBonusHP(state.wave), total=base+state.extraDifficulty;
+    q=q.map(s=>({...s,bonusHP:(s.type==='zred30')?0:total}));
+
+    q=attachZebraGroupEvery3(q);
+    q=attachBossToQueueIfNeeded(q);
+
+    state.spawnQueue=q; state.spawnTimer=0; state.waveActive=true; ui.startBtn.disabled=true;
+    updateHUD(); state.waveBannerTimer=1.6;
+    setTip(`Wave ${state.wave} started! (+${base} base, +${state.extraDifficulty} extra)`);
+    refreshToolLabels();
+
+    // Skip lock counts down per wave you actually play
+    if(state.skipWaveLock>0) state.skipWaveLock = Math.max(0, state.skipWaveLock - 1);
+  }
+
+  // Skip Wave
+  if(ui.skipBtn){
+    ui.skipBtn.addEventListener('click', ()=>{
+      if (state.skipWaveLock > 0){
+        setTip(`Skip locked for ${state.skipWaveLock} wave(s)`);
+        addPopup(220,40,`⏭ LOCK ${state.skipWaveLock}`,'#ffd6a8',1.0);
+        return;
+      }
+      if (state.skipCooldown > 0){
+        setTip(`Skip recharging: ${state.skipCooldown.toFixed(1)}s`);
+        addPopup(220,40,`⏭ ${state.skipCooldown.toFixed(1)}s`,'#ffd6a8',0.9);
+        return;
+      }
+      if (state.money < SKIP_COST){ setTip('Not enough money to skip'); return; }
+
+      state.money -= SKIP_COST;
+      state.spawnQueue = [];
+      state.bloons = [];
+      updateHUD();
+      state.waveActive = false;
+      ui.startBtn && (ui.startBtn.disabled = false);
+
+      state.skipCooldown = 10;
+      state.skipWaveLock = 3;
+      addPopup(220, 40, '⏭ Skipped!','#ffe0a8', 1.1);
+      startNextWave();
+    });
+  }
+
+  // Toggle Pay with Lives
+  if (ui.payWithLivesBtn) {
+    ui.payWithLivesBtn.addEventListener('click', () => {
+      state.payWithLives = !state.payWithLives;
+      ui.payWithLivesBtn.textContent = `Pay w/ Lives: ${state.payWithLives ? 'ON' : 'OFF'}`;
+      ui.payWithLivesBtn.classList.toggle('on', state.payWithLives);
+      setTip(state.payWithLives ? 'Paying with 5 ❤️ per tower' : 'Paying with money');
+    });
+  }
+
+  // ICE Power
+  if(ui.iceBtn){
+    ui.iceBtn.addEventListener('click', ()=>{
+      if (state.iceCooldown > 0){
+        setTip(`Ice recharging: ${state.iceCooldown.toFixed(1)}s`);
+        addPopup(canvas.width-100, 40, `❄ ${state.iceCooldown.toFixed(1)}s`, '#cfe8ff', 0.9);
+        return;
+      }
+      if(state.money < COST.ice){ setTip('Not enough money'); return; }
+      if (state.freezeTimer >= 2){
+        setTip('Ice is already at 2s cap');
+        addPopup(canvas.width-90,40,'❄ at max (2s)','#cfe8ff',1.0);
+        return;
+      }
+      state.money -= COST.ice;
+      state.freezeTimer = Math.min(2, state.freezeTimer + 2);
+      state.iceCooldown = 10;
+      addPopup(canvas.width-90,40,`❄ Freeze ${state.freezeTimer.toFixed(1)}s`,'#cfe8ff',1.2);
+      updateHUD();
+    });
+  }
+
+  // Buy Life (cap 100)
+  if(ui.buyLifeBtn){
+    ui.buyLifeBtn.addEventListener('click', ()=>{
+      if (state.lives >= LIFE_MAX){ setTip('Life is already at max'); return; }
+      if (state.money < LIFE_COST){ setTip('Not enough money'); return; }
+      state.money -= LIFE_COST; state.lives = Math.min(LIFE_MAX, state.lives + 1);
+      addPopup(90, 40, '+1 life', '#d7ffd7', 1.2); updateHUD();
+    });
+  }
+
+  // NEW: Buy extra tower slot for 5 lives (up to MAX_SLOTS_CAP)
+  if (ui.buySlotBtn){
+    ui.buySlotBtn.addEventListener('click', ()=>{
+      if (state.maxTowers >= MAX_SLOTS_CAP){
+        setTip(`Tower slots capped at ${MAX_SLOTS_CAP}`);
+        addPopup(240, 40, `Cap ${MAX_SLOTS_CAP}`, '#ffd6a8', 1.1);
+        return;
+      }
+      if (state.lives < 5){
+        setTip('Need 5 ❤ to buy a slot');
+        addPopup(240, 40, 'Need 5 ❤', '#ffb3b3', 1.0);
+        return;
+      }
+      state.lives -= 5;
+      state.maxTowers += 1;
+      addPopup(240, 40, '+1 slot (-5❤)', '#ffd6a8', 1.2);
+      updateHUD();
+    });
+  }
+
+  // Tools & Autoplay
+  ui.tools.forEach(btn=>{
+    btn.addEventListener('click',()=>{
+      ui.tools.forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      state.buildType=btn.dataset.type;
+    });
+  });
+  if(ui.autoplayBtn){
+    ui.autoplayBtn.addEventListener('click',()=>{
+      state.autoplay=!state.autoplay;
+      ui.autoplayBtn.textContent=`Autoplay: ${state.autoplay?'ON':'OFF'}`;
+      ui.autoplayBtn.classList.toggle('on',state.autoplay);
+    });
+  }
+
+  function pointSegmentDistance(p,a,b){const abx=b.x-a.x,aby=b.y-a.y,apx=p.x-a.x,apy=p.y-a.y,ab2=abx*abx+aby*aby;let t=(apx*abx+apy*aby)/(ab2||1);t=clamp(t,0,1);const x=a.x+abx*t,y=a.y+aby*t;return Math.hypot(p.x-x,p.y-y);}
+  function tooCloseToPath(p,minD){for(let i=0;i<path.length-1;i++){if(pointSegmentDistance(p,path[i],path[i+1])<minD)return true;}return false;}
+  function tooCloseToOtherTowers(p,gap){for(const t of state.towers){if(Math.hypot(p.x-t.x,p.y-t.y)<gap)return true;}return false;}
+
+  // Left click: upgrade or place tower (supports Pay w/ Lives)
+  canvas.addEventListener('click',(e)=>{
+    const r=canvas.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;
+
+    // Confirm-sell dialog?
+    if(state.sellPrompt){
+      const sp=state.sellPrompt,w=160,h=60,px=sp.x,py=sp.y,yes={x:px+12,y:py+28,w:56,h:24},no={x:px+90,y:py+28,w:56,h:24};
+      if(x>=yes.x&&x<=yes.x+yes.w&&y>=yes.y&&y<=yes.y+yes.h){
+        const t=state.towers[sp.idx]; if(t){ const refund=Math.floor(sp.refund); state.towers.splice(sp.idx,1); state.money+=refund; addPopup(px+80,py-6,`+$${refund} (sold)`,'#c7ffd0',1.2); updateHUD(); }
+        state.sellPrompt=null; return;
+      } else if(x>=no.x&&x<=no.x+no.w&&y>=no.y&&y<=no.y+no.h){ state.sellPrompt=null; return; }
+      else { state.sellPrompt=null; }
+    }
+
+    // Try upgrade if clicked on a tower
+    for(const t of state.towers){
+      if(t.containsPoint(x,y)){ t.select(); t.tryUpgrade(); return; }
+    }
+
+    // Build new tower (respect dynamic maxTowers)
+    if (state.towers.length >= state.maxTowers){
+      addPopup(x,y-22,`Tower limit reached (${state.maxTowers})`,'#ffb3b3',1.2);
+      setTip('Tower limit reached'); return;
+    }
+    const type = state.buildType;
+    const cost = getTowerCost(type);
+
+    // spacing and path checks first
+    const p={x,y};
+    if(tooCloseToPath(p,30)){ setTip('Can’t build on the track'); addPopup(x,y-22,'Can’t build on track','#ffd0d0',1.0); return; }
+    if(tooCloseToOtherTowers(p,MIN_TOWER_GAP)){ setTip('Towers must be farther apart'); addPopup(x,y-22,'Too close to tower','#ffd0d0',1.0); return; }
+
+    // payment: lives or money (not for ice; ice is a button, not placed here)
+    let paidWithLives=false;
+    if (state.payWithLives){
+      if (state.lives >= 5){
+        state.lives -= 5;
+        paidWithLives = true;
+      } else {
+        setTip('Not enough lives (need 5)');
+        addPopup(x, y-22, 'Need 5 ❤', '#ffb3b3', 1.0);
+        return;
+      }
+    } else {
+      if(state.money<cost){ setTip('Not enough money'); addPopup(x,y-22,'Not enough money','#ffb3b3',1.0); return; }
+      state.money-=cost;
+    }
+
+    // create tower
+    let t;
+    if(type==='dart') t=new DartTower(x,y);
+    else if(type==='sniper') t=new SniperTower(x,y);
+    else if(type==='cannon') t=new CannonTower(x,y);
+    else if(type==='machine') t=new MachineTower(x,y);
+    else if(type==='lightning') t=new LightningTower(x,y);
+    t.buyTotal = paidWithLives ? 0 : cost; // refund is money-based; lives payment yields $0 refund base
+    t.select();
+    state.towers.push(t);
+
+    if (paidWithLives) addPopup(x,y-28,'-5 ❤','#ffb3b3',1.0);
+    else addPopup(x,y-28,`-$${cost}`,'#ffd0d0',1.0);
+
+    updateHUD();
+  });
+
+  // Right click: confirm-sell (50% refund of money spent; lives-spent towers have 0 base)
+  canvas.addEventListener('contextmenu',(e)=>{
+    e.preventDefault();
+    const r=canvas.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;
+    for(let i=state.towers.length-1;i>=0;i--){
+      const t=state.towers[i];
+      if(t.containsPoint(x,y)){
+        const refund=Math.floor(t.buyTotal*0.5);
+        const px=clamp(t.x-80,4,canvas.width-164), py=clamp(t.y-78,4,canvas.height-76);
+        state.sellPrompt={x:px,y:py,idx:i,refund,ttl:3.0};
+        return;
+      }
+    }
+    state.sellPrompt=null;
+  });
+
+  // Keyboard + Start Button
+  window.addEventListener('keydown',(e)=>{
+    if(e.key==='Escape'&&state.sellPrompt){state.sellPrompt=null;}
+    if(e.code==='Space'){e.preventDefault();if(!state.waveActive)startNextWave();}
+  });
+  ui.startBtn && ui.startBtn.addEventListener('click',()=>{if(!state.waveActive)startNextWave();});
+
+  function updateHUD(){
+    ui.moneyEl.textContent=Math.floor(state.money);
+    ui.livesEl.textContent=state.lives;
+    ui.waveEl.textContent=state.wave;
+    if (ui.towersLeftEl){
+      const left = Math.max(0, state.maxTowers - state.towers.length);
+      ui.towersLeftEl.textContent = left;
+    }
+    if (ui.towersMaxEl){
+      ui.towersMaxEl.textContent = state.maxTowers;
+    }
+  }
+
+  function drawBackground(){
+    const g=ctx.createLinearGradient(0,0,0,canvas.height);g.addColorStop(0,'#0f121b');g.addColorStop(1,'#0b0d12');ctx.fillStyle=g;ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.save();ctx.lineWidth=1;
+    for(let x=0;x<canvas.width;x+=32){ctx.strokeStyle=(x/32)%2===0?'#171c2a':'#141824';ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,canvas.height);ctx.stroke();}
+    for(let y=0;y<canvas.height;y+=32){ctx.strokeStyle=(y/32)%2===0?'#171c2a':'#141824';ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(canvas.width,y);ctx.stroke();}
+    ctx.restore();
+    const pg=ctx.createLinearGradient(0,180,0,380);pg.addColorStop(0,'#2a3a58');pg.addColorStop(1,'#26324a');ctx.strokeStyle=pg;ctx.lineWidth=36;ctx.lineCap='round';
+    ctx.beginPath();ctx.moveTo(path[0].x,path[0].y);for(let i=1;i<path.length;i++)ctx.lineTo(path[i].x,path[i].y);ctx.stroke();
+    ctx.strokeStyle='#192236';ctx.lineWidth=40;ctx.globalAlpha=0.28;ctx.beginPath();ctx.moveTo(path[0].x,path[0].y);for(let i=1;i<path.length;i++)ctx.lineTo(path[i].x,path[i].y);ctx.stroke();ctx.globalAlpha=1;
+  }
+  function drawBossWarning(){
+    if(!state.bossWarnActive)return;
+    const a=clamp(state.bossWarnTimer/3,0,1);
+    ctx.save();ctx.globalAlpha=0.85*a;ctx.fillStyle='#2a0a0a';ctx.fillRect(0,0,canvas.width,42);
+    ctx.fillStyle='#ff4d4d';ctx.font='bold 22px system-ui';ctx.textAlign='center';ctx.fillText('⚠ BOSS INCOMING!',canvas.width/2,28);ctx.restore();
+  }
+  function drawBossBar(){
+    const boss=state.bloons.find(b=>b.alive&&b.type==='boss');if(!boss)return;
+    const w=360,h=14,x=(canvas.width-w)/2,y=8,ratio=clamp(boss.hits/boss._maxHits,0,1);
+    ctx.save();ctx.fillStyle='rgba(20,10,10,0.85)';ctx.fillRect(x-4,y-4,w+8,h+8);
+    ctx.fillStyle='#3a0d0d';ctx.fillRect(x,y,w,h);
+    ctx.fillStyle='#ff4d4d';ctx.fillRect(x,y,w*ratio,h);
+    ctx.strokeStyle='#842';ctx.lineWidth=2;ctx.strokeRect(x,y,w,h);
+    ctx.fillStyle='#fff';ctx.font='bold 12px system-ui';ctx.textAlign='center';ctx.fillText(`BOSS ${boss.hits}/${boss._maxHits}`,x+w/2,y+h+14);
+    ctx.restore();
+  }
+  function drawWaveBanner(){
+    if(state.waveBannerTimer<=0)return;
+    const a=clamp(state.waveBannerTimer/1.6,0,1);
+    ctx.save();ctx.globalAlpha=a;ctx.fillStyle='#0b1222';
+    const w=360,h=36,x=(canvas.width-w)/2,y=48;ctx.fillRect(x,y,w,h);
+    ctx.strokeStyle='#2d4a7a';ctx.strokeRect(x,y,w,h);
+    const base=perWaveBonusHP(state.wave);
+    ctx.fillStyle='#cfe1ff';ctx.font='bold 16px system-ui';ctx.textAlign='center';
+    ctx.fillText(`Wave ${state.wave}! (+${base} base, +${state.extraDifficulty} extra)`,x+w/2,y+24);
+    ctx.restore();
+  }
+  function drawFreezeTimerHUD(){
+    if (state.freezeTimer <= 0) return;
+    const s = state.freezeTimer.toFixed(1);
+    ctx.save();
+    ctx.fillStyle='rgba(20,30,45,0.9)'; ctx.fillRect(canvas.width-130, 8, 122, 26);
+    ctx.strokeStyle='#3a4f78'; ctx.strokeRect(canvas.width-130, 8, 122, 26);
+    ctx.fillStyle='#cfe8ff'; ctx.font='bold 14px system-ui'; ctx.fillText(`❄ ${s}s`, canvas.width-120, 27);
+    ctx.restore();
+  }
+  function drawIceCooldownHUD(){
+    if (state.iceCooldown <= 0) return;
+    const s = state.iceCooldown.toFixed(1);
+    ctx.save();
+    ctx.fillStyle='rgba(30,24,20,0.9)'; ctx.fillRect(canvas.width-130, 38, 122, 22);
+    ctx.strokeStyle='#5a4638'; ctx.strokeRect(canvas.width-130, 38, 122, 22);
+    ctx.fillStyle='#ffe0c0'; ctx.font='bold 12px system-ui'; ctx.fillText(`❄ CD ${s}s`, canvas.width-122, 54);
+    ctx.restore();
+  }
+  function drawSkipCooldownHUD(){
+    if (state.skipCooldown <= 0) return;
+    const s = state.skipCooldown.toFixed(1);
+    ctx.save();
+    ctx.fillStyle='rgba(30,40,20,0.9)'; ctx.fillRect(8, 8, 110, 22);
+    ctx.strokeStyle='#456a2a'; ctx.strokeRect(8, 8, 110, 22);
+    ctx.fillStyle='#d6ffb0'; ctx.font='bold 12px system-ui'; ctx.fillText(`⏭ CD ${s}s`, 16, 24);
+    ctx.restore();
+  }
+  function drawSkipLockHUD(){
+    if (state.skipWaveLock <= 0) return;
+    ctx.save();
+    ctx.fillStyle='rgba(60,20,20,0.9)'; ctx.fillRect(8, 34, 140, 22);
+    ctx.strokeStyle='#7a3a3a'; ctx.strokeRect(8, 34, 140, 22);
+    ctx.fillStyle='#ffc8c8'; ctx.font='bold 12px system-ui'; ctx.fillText(`⏭ LOCK ${state.skipWaveLock} wave(s)`, 14, 50);
+    ctx.restore();
+  }
+
+  function updateWaveActiveFlag(){
+    const active = state.spawnQueue.length>0 || state.bloons.length>0;
+    state.waveActive=active; ui.startBtn && (ui.startBtn.disabled=active);
+    if(!active && state.autoplay){
+      if(!state._autoQueued){ state._autoQueued=true; setTimeout(()=>{ state._autoQueued=false; startNextWave(); },700); }
+    }
+  }
+
+  let last=performance.now();
+  function tick(now){
+    dtGlobal=Math.min(0.033,(now-last)/1000); last=now;
+
+    if(tipTimer>0){tipTimer-=dtGlobal;if(tipTimer<=0){ui.tipEl.textContent='Max starts at 20 (buy slots -5❤, up to 40). Pay w/ Lives costs 5❤. ❄ Ice 2s/10s CD. ⏭ Skip $100, 10s CD + 3-wave lock. Every 3rd wave: dart-immune reds. Boss every 5.';}}
+    if(state.freezeTimer>0){state.freezeTimer=Math.max(0,state.freezeTimer-dtGlobal);}
+    if(state.iceCooldown>0){state.iceCooldown=Math.max(0,state.iceCooldown-dtGlobal);}
+    if(state.skipCooldown>0){state.skipCooldown=Math.max(0,state.skipCooldown-dtGlobal);}
+
+    // Skip button state
+    if(ui.skipBtn){
+      if(state.skipWaveLock>0){
+        ui.skipBtn.textContent = `⏭ Skip Wave (LOCK ${state.skipWaveLock})`;
+        ui.skipBtn.disabled = true;
+      } else if(state.skipCooldown>0){
+        ui.skipBtn.textContent = `⏭ Skip Wave (${state.skipCooldown.toFixed(1)}s)`;
+        ui.skipBtn.disabled = true;
+      } else {
+        ui.skipBtn.textContent = `⏭ Skip Wave ($${SKIP_COST})`;
+        ui.skipBtn.disabled = false;
+      }
+    }
+
+    // Boss warning trigger window
+    if(!state.bossWarnActive&&state.spawnQueue.length){
+      const next=state.spawnQueue.find(s=>s.type==='boss');
+      if(next&&state.spawnTimer<next.delay&&(next.delay-state.spawnTimer)<=3.05){state.bossWarnActive=true;state.bossWarnTimer=3.0;}
+    }
+    if(state.bossWarnActive){state.bossWarnTimer-=dtGlobal;if(state.bossWarnTimer<=0)state.bossWarnActive=false;}
+
+    // Spawning
+    state.spawnTimer+=dtGlobal;
+    while(state.spawnQueue.length&&state.spawnTimer>=state.spawnQueue[0].delay){
+      const s=state.spawnQueue.shift();
+      if(s.type==='boss'){ state.bloons.push(new Bloon('boss',{hits:s.hp})); }
+      else if(s.type==='zred30'){ state.bloons.push(new Bloon('zred30',{fixedHP:30,dartImmune:true})); }
+      else { state.bloons.push(new Bloon(s.type,{bonusHP:s.bonusHP||0})); }
+    }
+
+    for(const t of state.towers)t.update(dtGlobal);
+    for(const d of state.darts)d.update(dtGlobal);
+    for(const s of state.shells) s.update(dtGlobal);
+    for(const L of state.lightnings)L.update(dtGlobal);
+    for(const b of state.bloons)b.update(dtGlobal);
+    for(const p of state.popups)p.update(dtGlobal);
+    if(state.waveBannerTimer>0)state.waveBannerTimer-=dtGlobal;
+
+    state.darts=state.darts.filter(d=>d.alive);
+    state.shells=state.shells.filter(s=>s.alive);
+    state.lightnings=state.lightnings.filter(L=>L.alive);
+    state.bloons=state.bloons.filter(b=>b.alive);
+    state.popups=state.popups.filter(p=>p.alive);
+
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    drawBackground();
+    for(const t of state.towers)t.draw();
+    for(const d of state.darts)d.draw();
+    for(const s of state.shells)s.draw();
+    for(const L of state.lightnings)L.draw();
+    for(const b of state.bloons)b.draw();
+    drawBossWarning(); drawBossBar(); drawWaveBanner();
+    if(state.freezeTimer>0){ctx.fillStyle='rgba(150,200,255,0.10)';ctx.fillRect(0,0,canvas.width,canvas.height);}
+    for(const p of state.popups)p.draw();
+    drawFreezeTimerHUD(); drawIceCooldownHUD(); drawSkipCooldownHUD(); drawSkipLockHUD();
+
+    if(state.sellPrompt){
+      const sp=state.sellPrompt; sp.ttl-=dtGlobal; if(sp.ttl<=0){state.sellPrompt=null;}
+      else{
+        const w=160,h=60,x=sp.x,y=sp.y;
+        ctx.save();
+        ctx.fillStyle='rgba(15,20,30,0.95)';ctx.fillRect(x,y,w,h);
+        ctx.strokeStyle='#3a4257';ctx.lineWidth=2;ctx.strokeRect(x,y,w,h);
+        ctx.fillStyle='#eaeaea';ctx.font='bold 13px system-ui';ctx.fillText(`Sell for $${sp.refund}?`,x+12,y+18);
+        ctx.fillStyle='#223349';ctx.fillRect(x+12,y+28,56,24);ctx.strokeStyle='#486089';ctx.strokeRect(x+12,y+28,56,24);
+        ctx.fillStyle='#cfe1ff';ctx.font='bold 12px system-ui';ctx.fillText('Yes',x+30,y+44);
+        ctx.fillStyle='#35212a';ctx.fillRect(x+90,y+28,56,24);ctx.strokeStyle='#6a3a48';ctx.strokeRect(x+90,y+28,56,24);
+        ctx.fillStyle='#ffd0d8';ctx.font='bold 12px system-ui';ctx.fillText('No',x+110,y+44);
+        ctx.restore();
+      }
+    }
+
+    updateWaveActiveFlag(); updateHUD(); refreshToolLabels();
+    if(state.lives>0)requestAnimationFrame(tick); else gameOver();
+  }
+
+  function gameOver(){
+    ctx.fillStyle='rgba(0,0,0,.6)';ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.fillStyle='#fff';ctx.textAlign='center';ctx.font='bold 40px system-ui';
+    ctx.fillText('Game Over',canvas.width/2,canvas.height/2);
+  }
+
+  refreshToolLabels(); updateHUD(); requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
