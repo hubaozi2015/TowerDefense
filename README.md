@@ -1,4 +1,7 @@
-# Tower Defense V 2.3.1
+# Tower Defense V 2.5
+Added 'dynamic' lives, 100 lives but /2 of balloon remaining hp instead of just removing 1 each. 
+
+# Tower Defense V 2.4
 New balls/balloon immune to darts and snipers 
 
 # Tower Defense V 2.3.1
