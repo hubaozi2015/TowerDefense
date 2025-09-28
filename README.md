@@ -1,4 +1,4 @@
-# Tower Defense V 3.0 
+# Tower Defense V 3.0 - MAJOR RELEASE!
 Boss health increased, new baloons/balls only can be killed by specific tanks. 
 
 # Tower Defense V 2.5
