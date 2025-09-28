@@ -1,5 +1,5 @@
 # Tower Defense V 3.0 - MAJOR RELEASE!
-Boss health increased, new baloons/balls only can be killed by specific tanks. 
+Boss health increased, new baloons/balls only can be killed by specific tanks. Changes to max tank limits by sacrificing health for more tanks. 
 
 # Tower Defense V 2.5
 Added 'dynamic' lives, 100 lives but /2 of balloon remaining hp instead of just removing 1 each. 
